@@ -3,11 +3,17 @@ import multiprocessing
 import os
 import copy
 import platform
-import resource
 import sys
 import json
 import pickle
 import traceback
+
+# Try importing resource, but don't fail if not available
+try:
+    import resource
+    HAS_RESOURCE = True
+except ImportError:
+    HAS_RESOURCE = False
 
 from tqdm.auto import tqdm
 
@@ -109,22 +115,56 @@ class Runner:
 
     def run_experiment(self, config):
         if self.memlimit > 0:
-            os_name = platform.platform()
-            if not os_name.startswith("Linux"): raise ValueError("Currently only support setting memory limits for Linux")
-            current_soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-            limit_bytes = int(self.memlimit * 1024 * 1024) # self.memlimit in MB
-            print(f"Setting limit to {limit_bytes} bytes")
-            resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, hard))
+            try:
+                # Try Linux-specific approach first
+                os_name = platform.platform()
+                if os_name.startswith("Linux") and HAS_RESOURCE:
+                    current_soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+                    limit_bytes = int(self.memlimit * 1024 * 1024)
+                    print(f"Setting Linux memory limit to {limit_bytes} bytes")
+                    resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, hard))
+                    use_linux_limit = True
+                else:
+                    use_linux_limit = False
+                    raise ImportError("Not on Linux or resource module not available")
+            except (ImportError, ValueError):
+                # Fall back to psutil-based approach
+                try:
+                    import psutil
+                    process = psutil.Process()
+                    limit_bytes = int(self.memlimit * 1024 * 1024)
+                    print(f"Setting memory limit to {limit_bytes} bytes using psutil")
+                    use_linux_limit = False
+                except ImportError:
+                    print("Warning: psutil not installed. Memory limiting will be disabled.")
+                    self.memlimit = -1
+                    use_linux_limit = False
 
         dirname = self.mkdir()
         kwargs = self.make_kwargs(config)
         try:
-            result = self.func(**kwargs)
+            if self.memlimit > 0:
+                if not use_linux_limit:
+                    # Monitor memory usage during execution
+                    def check_memory():
+                        if process.memory_info().rss > limit_bytes:
+                            raise MemoryError("Memory limit exceeded")
+                    
+                    # Run the function with memory monitoring
+                    import threading
+                    monitor = threading.Thread(target=check_memory, daemon=True)
+                    monitor.start()
+                    result = self.func(**kwargs)
+                    monitor.join(timeout=0.1)  # Stop monitoring
+                else:
+                    result = self.func(**kwargs)
+            else:
+                result = self.func(**kwargs)
         except MemoryError as e:
             result = dict(err=str(traceback.format_exc()))
 
-        # might need to increase memory limit for writing to file
-        if self.memlimit > 0:
+        # Restore Linux memory limit if it was set
+        if self.memlimit > 0 and use_linux_limit and HAS_RESOURCE:
             resource.setrlimit(resource.RLIMIT_AS, (current_soft, hard))
 
         self.save_result(config, result, dirname)
