@@ -70,7 +70,7 @@ def unravel_dict(root_d, _dt=False, _td=False):
                 sub_dicts = unravel_dict(val, _td=True)
             else:
                 sub_dicts = unravel_dict(val)
-            new_dicts = [d | {key : sd} for sd in sub_dicts for d in new_dicts]
+            new_dicts = [{**d, key: sd} for sd in sub_dicts for d in new_dicts]
 
     elif isinstance(root_d, list):
         new_dicts = [unravel_dict(val) for val in root_d]
