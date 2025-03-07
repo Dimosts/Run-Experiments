@@ -7,6 +7,7 @@ import sys
 import json
 import pickle
 import traceback
+import time
 
 # Try importing resource, but don't fail if not available
 try:
@@ -24,6 +25,14 @@ from os import listdir
 
 from .messages import *
 from .utils import dirlock
+
+# At the top of the file, after imports
+if platform.system() == 'Windows':
+    try:
+        multiprocessing.set_start_method('spawn')
+    except RuntimeError:
+        # Context already set, that's okay
+        pass
 
 class Runner:
 
@@ -90,7 +99,14 @@ class Runner:
         pool.map(self.run_experiment,[config])
 
     def run_batch(self, config, parallel=False, num_workers=None, show_progress=True):
-
+        """
+            Run a batch of experiments
+            
+            :param config: configuration dictionary
+            :param parallel: whether to run experiments in parallel
+            :param num_workers: number of worker processes (default: cpu_count - 1)
+            :param show_progress: whether to show progress bar
+        """
         configs = unravel_dict(config)
         total_exp = len(configs)
 
@@ -105,13 +121,27 @@ class Runner:
             if num_workers is None:
                 num_workers = multiprocessing.cpu_count() - 1
 
-            print(f"Running in parallel with {num_workers} threads")
-
-            manager = multiprocessing.Manager()
-            dirlock = manager.Lock()
-
-            pool = multiprocessing.Pool(num_workers, maxtasksperchild=1, initargs=(dirlock,))
-            lst = list(tqdm(pool.imap(self.run_experiment, configs), total=len(configs)))
+            print(f"Running in parallel with {num_workers} processes")
+            
+            # Create processes that will each handle one experiment
+            processes = []
+            for config in configs:
+                p = multiprocessing.Process(target=self.run_experiment, args=(config,))
+                processes.append(p)
+                p.start()
+                
+                # Wait if we've reached max workers
+                while len([p for p in processes if p.is_alive()]) >= num_workers:
+                    for p in processes:
+                        if not p.is_alive():
+                            p.join()
+                            processes.remove(p)
+                            break
+                    time.sleep(1)  # Small delay to prevent CPU spinning
+            
+            # Wait for remaining processes
+            for p in processes:
+                p.join()
 
         else:
             if show_progress: pbar = tqdm(total=len(configs))
@@ -121,6 +151,9 @@ class Runner:
                 if show_progress: pbar.update()
 
     def run_experiment(self, config):
+        """
+            Run a single experiment with the given configuration
+        """
         if self.memlimit > 0:
             try:
                 # Try Linux-specific approach first
